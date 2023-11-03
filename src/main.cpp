@@ -21,7 +21,6 @@ uint8_t __rowNum = 1;
 const int batterySensorPin = A4;  // 32 pin
 const uint8_t _probesToAvgADC = 30;
 
-
 // variables:
 uint8_t battPercent = 0;
 int sensorValue = 0;   // the sensor value
@@ -63,7 +62,6 @@ volatile SemaphoreHandle_t timer1Semaphore;
 portMUX_TYPE timer0Mux = portMUX_INITIALIZER_UNLOCKED;
 portMUX_TYPE timer1Mux = portMUX_INITIALIZER_UNLOCKED;
 
-
 // ECG Measure
 #define ECG_LEN 3200
 uint16_t ecgSamples[ECG_LEN];
@@ -73,20 +71,41 @@ bool haveNewEcgMeasure = false;
 uint64_t millisStart = 0;
 
 // for transmit ecg data with BLE
-#define FrameSize 64
-#define FrameSizeToSend FrameSize*4
+#define FrameSize 128
 volatile bool transmitted = false;
  
 void transmitEcgData() {
   Serial.println("Begin send ECG...");
   display.println("Begin send ECG...");
   display.display();
+
+  int size = FrameSize*sizeof(ecgSamples[0]);
+  char* tmpToSend = (char*)malloc(size);
+  memset(tmpToSend, 0, size);
+
+  Serial.print("begin transmit. Max i - "); Serial.println(ECG_LEN / FrameSize);
+  
   for(int i = 0; i < ECG_LEN / FrameSize; i++) {
-    Serial.println(i);
-    pCharacteristic->setValue((uint8_t*)&ecgSamples + i * FrameSizeToSend, FrameSizeToSend);
+    Serial.print("i            "); Serial.println(i);
+    int bytesToSend = FrameSize*sizeof(ecgSamples[0]);
+    Serial.print("bytesToSend  "); Serial.println(bytesToSend);
+    int bytesToSendI = bytesToSend * i;
+    Serial.print("bytesToSendI "); Serial.println(bytesToSendI);
+    
+    memcpy(tmpToSend, (uint8_t*)&ecgSamples + bytesToSendI, size);
+    Serial.print( "data: " );
+    for ( int i = 0; i < size; i++ )
+    {
+      Serial.print( tmpToSend[i], HEX );
+      Serial.print(" ");
+    }
+    Serial.println("");
+
+    pCharacteristic->setValue((uint8_t*)tmpToSend, bytesToSend);
     pCharacteristic->notify();
     delay(5);
   }
+  free(tmpToSend);
 }
 
 void print_wakeup_reason(){
@@ -137,7 +156,9 @@ class MyServerCallbacks: public BLEServerCallbacks {
     void onConnect(BLEServer* pServer) {
       display.println("BLE dev connected");
       display.display();
-      getEcgADC();
+      //getEcgADC();
+
+      transmitEcgData();
       deviceConnected = true;
     };
 
@@ -145,7 +166,8 @@ class MyServerCallbacks: public BLEServerCallbacks {
       display.println("BLE dev disconn");
       display.display();
       deviceConnected = false;
-    }
+    };
+
 };
 
 void clearDisplayExceptBattinfo() {
@@ -173,6 +195,12 @@ void setupDisplay() {
 void setup() {
 
   Serial.begin(115200);
+
+  //test
+  for(int i = 0; i< ECG_LEN; i++) {
+    ecgSamples[i] = i;
+  }
+  //
 
   //Increment boot number and print it every reboot
   ++bootCount;
@@ -303,3 +331,4 @@ void loop() {
   getAndShowBatteryInfo();
   delay(500);
 };
+
