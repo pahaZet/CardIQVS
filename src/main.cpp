@@ -1,3 +1,5 @@
+
+#include "main.h"
 #include <BLEDevice.h>
 #include <BLEServer.h>
 #include <BLEUtils.h>
@@ -7,6 +9,8 @@
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+
+volatile struct mainPackStructure mainPackStructure = { .batteryPercent = 0, .ecgPartsCount = 0};
 
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
@@ -22,18 +26,15 @@ const int batterySensorPin = A4;  // 32 pin
 const uint8_t _probesToAvgADC = 30;
 
 // variables:
-uint8_t battPercent = 0;
-int sensorValue = 0;   // the sensor value
+volatile uint8_t battPercent = 0;
+volatile float calcVoltage = 0;
+volatile int sensorValue = 0;   // the sensor value
 #define SnakeRollLen 10
 int32_t snakeRoll[SnakeRollLen]; 
 uint8_t currentSnakeRollPosition = 0;
 bool _isFullSnakeRoll = false;
 
 // BLE
-#define BatteryService BLEUUID((uint16_t)0x180F)
-BLECharacteristic BatteryLevelCharacteristic(BLEUUID((uint16_t)0x2A19), BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
-BLEDescriptor BatteryLevelDescriptor(BLEUUID((uint16_t)0x2901));
-
 BLEServer* pServer = NULL;
 BLECharacteristic* pCharacteristic = NULL;
 bool deviceConnected = false;
@@ -74,6 +75,8 @@ uint64_t millisStart = 0;
 #define FrameSize 128
 volatile bool transmitted = false;
  
+
+// Отправка данных ЭКГ по BLE
 void transmitEcgData() {
   Serial.println("Begin send ECG...");
   display.println("Begin send ECG...");
@@ -108,6 +111,12 @@ void transmitEcgData() {
   free(tmpToSend);
 }
 
+void sendStructure() {
+  pCharacteristic->setValue((uint8_t*)&mainPackStructure, sizeof(mainPackStructure));
+  pCharacteristic->notify();
+}
+
+// вывод причины пробуждения ESP. для тестов
 void print_wakeup_reason(){
   esp_sleep_wakeup_cause_t wakeup_reason;
 
@@ -134,13 +143,47 @@ void IRAM_ATTR Timer0_ISR()
   ecgSamples[currentEcgSampleIdx] = analogRead(ecgPin);
 
   if (currentEcgSampleIdx++ >= ECG_LEN) { // Хватит)
-    currentEcgSampleIdx = 0;
     measurementEcgInProgress = false;
     haveNewEcgMeasure = true;
   }
    
 };
 
+class MyServerCallbacks: public BLEServerCallbacks {
+    void onConnect(BLEServer* pServer) {
+      display.println("BLE dev connected");
+      display.display();
+      deviceConnected = true;
+    };
+
+    void onDisconnect(BLEServer* pServer) {
+      display.println("BLE dev disconn");
+      display.display();
+      deviceConnected = false;
+    };
+};
+
+class MyCallbacks: public BLECharacteristicCallbacks {
+    void onWrite(BLECharacteristic *pCharacteristic) {
+      std::string value = pCharacteristic->getValue();
+
+      if (value.length() > 0) {
+        Serial.println("****ble incame*****");
+        for (int i = 0; i < value.length(); i++)
+          Serial.print(value[i]);
+
+        Serial.println();
+
+        if (value == "ping")
+          sendStructure();
+        else if (value == "ecg")
+          getEcgADC();
+      }
+
+    }
+};
+
+// Получение данных ЭКГ
 void getEcgADC() {
   Serial.println("Start measure ECG...");
   display.println("Start measure ECG");
@@ -152,29 +195,16 @@ void getEcgADC() {
   millisStart = millis();
 };
 
-class MyServerCallbacks: public BLEServerCallbacks {
-    void onConnect(BLEServer* pServer) {
-      display.println("BLE dev connected");
-      display.display();
-      //getEcgADC();
-
-      transmitEcgData();
-      deviceConnected = true;
-    };
-
-    void onDisconnect(BLEServer* pServer) {
-      display.println("BLE dev disconn");
-      display.display();
-      deviceConnected = false;
-    };
-
-};
-
 void clearDisplayExceptBattinfo() {
   display.clearDisplay();
   display.setCursor(85,0);
-  display.setTextSize(2); 
-  display.print(battPercent);
+  display.setTextSize(1); 
+  //display.setTextSize(2); 
+
+  display.print(calcVoltage);
+
+  
+
   display.print("%");
   display.setTextSize(1);  
   display.setCursor(0,0); 
@@ -215,7 +245,7 @@ void setup() {
   // lets vibrate
   pinMode(virboPin, OUTPUT);
   digitalWrite(virboPin, HIGH);
-  delay(1000);
+  delay(200);
   digitalWrite(virboPin, LOW);
 
 
@@ -238,9 +268,9 @@ void setup() {
                       CHARACTERISTIC_UUID,
                       BLECharacteristic::PROPERTY_READ   |
                       BLECharacteristic::PROPERTY_WRITE  |
-                      BLECharacteristic::PROPERTY_NOTIFY |
-                      BLECharacteristic::PROPERTY_INDICATE
+                      BLECharacteristic::PROPERTY_NOTIFY
                     );
+  pCharacteristic->setCallbacks(new MyCallbacks());
 
   // https://www.bluetooth.com/specifications/gatt/viewer?attributeXmlFile=org.bluetooth.descriptor.gatt.client_characteristic_configuration.xml
   // Create a BLE Descriptor
@@ -248,17 +278,7 @@ void setup() {
   // Start the service
   pService->start();
 
-  // battery
-  BLEService *pBattery = pServer->createService(BatteryService);
-  pBattery->addCharacteristic(&BatteryLevelCharacteristic);
-  BatteryLevelDescriptor.setValue("Percentage 0 - 100");
-  BatteryLevelCharacteristic.addDescriptor(&BatteryLevelDescriptor);
-  BatteryLevelCharacteristic.addDescriptor(new BLE2902());
-  
-  pServer->getAdvertising()->addServiceUUID(BatteryService);
-  pBattery->start();
-
-  // Start advertising
+   // Start advertising
   BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
   pAdvertising->addServiceUUID(SERVICE_UUID);
   pAdvertising->setScanResponse(true);
@@ -290,8 +310,10 @@ void setup() {
 void getAndShowBatteryInfo() {
   // BATT INFO:
   sensorValue = analogRead(batterySensorPin);
-  float calcVoltage = (float)sensorValue * 3390 / 4095 * 1.0182904068  * 1.47;
+  calcVoltage = (float)sensorValue * 3390 / 4095 * 1.0182904068  * 1.47;
   battPercent = 100 - ((4200 - calcVoltage) * 100 / (4200-3200));
+  Serial.println(calcVoltage);
+  mainPackStructure.batteryPercent = battPercent;
   clearDisplayExceptBattinfo();
 }
 
@@ -303,13 +325,9 @@ void loop() {
     timerAlarmDisable(Timer0_Cfg);
     Serial.print("Measure ECG comlited. From loop. Time ");
     Serial.println((millis() - millisStart));
-    if (deviceConnected && !transmitted) {
-      transmitted = true;
-      haveNewEcgMeasure = false;
-      transmitEcgData();
 
-      //getEcgADC();
-    }
+    mainPackStructure.ecgPartsCount = ECG_LEN / FrameSize;
+
   }
 
   // BLE Section
@@ -322,8 +340,6 @@ void loop() {
   }
   // connecting
   if (deviceConnected) {
-      BatteryLevelCharacteristic.setValue(&battPercent, 1);
-      BatteryLevelCharacteristic.notify();   
       oldDeviceConnected = deviceConnected;
   }
 
