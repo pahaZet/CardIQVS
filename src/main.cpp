@@ -82,7 +82,6 @@ bool haveNewEcgMeasure = false;
 #define FrameSize 128
 volatile bool transmitted = false;
  
-
 void sendStructure() {
   // сразу отправим и состояние присосок ЭКГ
   calcBattValues();
